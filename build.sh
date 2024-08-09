@@ -1,199 +1,76 @@
 #!/bin/bash
-set -e
+export ALLOW_MISSING_DEPENDENCIES=true
+export ANDROID_VERSION="android-14.0.0_r9"
+export ANDROID_VERSION_MAJOR="14"
 
-scriptdir="$(cd "$(dirname "$0")"; pwd)"
-topdir="`pwd`/android_build"
+# mirror of https://android.googlesource.com in China
+export AOSP_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/git/AOSP"
 
-googlebaseurl='https://android.googlesource.com/platform'
-tgzbaseurl="$googlebaseurl/@SOURCE@/+archive/@BUILDREF@.tar.gz"
+git clone ${AOSP_MIRROR}/platform/superproject android -b ${ANDROID_VERSION} --depth=1
+git clone ${AOSP_MIRROR}/platform/build android/build/make -b ${ANDROID_VERSION} --depth=1
+cd android
 
-sources=('bionic' 'libnativehelper' 'build' 'build/kati' 'system/core' 'external/jemalloc' 'external/libcxx' 'external/libcxxabi' 'external/zlib'
-         'external/iputils' 'external/elfutils' 'external/llvm' 'external/libunwind_llvm' 'external/compiler-rt' 'external/safe-iop' 'external/gtest')
-: ${buildref='nougat-release'}
-: ${arch:=`uname -m`}
-: ${usetgz:='yes'}
-: ${skipsrc:='no'}
-: ${skipindeps:='no'}
-: ${skipcross:='no'}
-# benchmarks are broken right now
-: ${skipbenches:='yes'}
-: ${skiptests:='yes'}
-# extra utilities like zlib, ping
-: ${skiputil:='yes'}
-ndkarch=$arch
-gccarch=$arch
-luncharch=$arch
-gccver=4.9
+packages=(
+"build/orchestrator" "build/blueprint" "build/pesto" "build/soong" "build/bazel" "build/bazel_common_rules"
 
-abi="$arch-linux-android"
+"prebuilts/go/linux-x86" "prebuilts/build-tools" "prebuilts/vndk/v29" "prebuilts/vndk/v30" "prebuilts/sdk"
+"prebuilts/vndk/v31" "prebuilts/vndk/v32" "prebuilts/vndk/v33" "prebuilts/rust"
+"prebuilts/jdk/jdk17" "prebuilts/bazel/common" "prebuilts/bazel/linux-x86_64" "prebuilts/clang/host/linux-x86"
+"prebuilts/clang-tools" "prebuilts/abi-dumps/platform" "prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8"
+"prebuilts/module_sdk/art"
 
-case $arch in
-    x86) abi='x86_64-linux-android'; ndkarch='x86_64';;
-    arm) abi+='eabi';;
-    x86_64) gccarch='x86';;
-    aarch64) ndkarch='arm64'; luncharch='arm64';;
-esac
+"external/golang-protobuf" "external/go-cmp" "external/spdx-tools" "external/starlark-go" "external/bazel-skylib"
+"external/avb" "external/bazelbuild-rules_android" "external/bazelbuild-rules_license" "external/sqlite"
+"external/python/absl-py" "external/python/apitools"  "external/python/asn1crypto" "external/python/bumble"
+"external/python/cachetools" "external/python/cffi" "external/python/cpython2" "external/python/cpython3"
+"external/python/cryptography" "external/python/dateutil" "external/python/enum34"  "external/python/google-auth-library-python"
+"external/python/google-api-python-client"  "external/python/httplib2" "external/python/ipaddress"
+"external/python/jinja" "external/python/markupsafe" "external/python/oauth2client" "external/python/parse_type"
+"external/python/portpicker" "external/python/pyasn1" "external/python/pyasn1-modules" "external/python/pybind11"
+"external/python/pycparser" "external/lzma" "external/python/pyee" "external/python/pyfakefs" "external/python/pyserial"
+"external/python/python-api-core" "external/python/pyyaml" "external/python/rsa" "external/python/setuptools"
+"external/python/six" "external/python/timeout-decorator" "external/python/typing" "external/python/uritemplates"
+"external/gwp_asan" "external/scudo" "external/bazelbuild-kotlin-rules" "external/libcxxabi" "external/libcxx"
+"external/compiler-rt" "external/fmtlib" "external/arm-optimized-routines" "external/pthreadpool" "external/zlib"
+"external/protobuf" "external/rust/crates/rustc-demangle" "external/rust/crates/rustc-demangle-capi"
+"system/sepolicy" "system/core" "system/logging" "system/libbase" "system/libziparchive" "system/unwinding"
+"system/libprocinfo" "external/googletest"
 
-clangver=3.6
-prebuilts=( "prebuilts/gcc/linux-x86/host/`uname -m`-linux-glibc2.15-4.8" 'prebuilts/clang/host/linux-x86'
-            'prebuilts/gcc/linux-x86/host/x86_64-w64-mingw32-4.8' 'prebuilts/ninja/linux-x86')
-
-download () {
-    echo "downloading $1"
-
-    if [ -d "$topdir/$1" ]
-    then
-        rm -rf "$topdir/$1"
-    fi
-    mkdir -p "$topdir/$1"
-    cd "$topdir/$1"
-
-    if [ "$usetgz" == 'no' ]
-    then
-        download_from_git $@
-    else
-        download_tarball $@
-    fi
-
-    cd "$topdir"
-}
-
-download_from_git () {
-    git init -q
-    git remote add origin "$googlebaseurl/$1"
-    git fetch --depth 1 origin "$2" -q 
-    git reset --hard FETCH_HEAD -q
-}
-
-download_tarball () {
-    tarfile="/tmp/`basename $1`.tgz"
-    curl -sL $(echo $tgzbaseurl | sed -e "s|@SOURCE@|$1|" -e "s|@BUILDREF@|$2|") -o $tarfile
-    tar -xf $tarfile
-    rm $tarfile
-}
-
-download_single_folder () {
-    echo "downloading $1/$3"
-    if [ -d "$topdir/$1" ]
-    then
-        rm -rf "$topdir/$1"
-    fi
-    mkdir -p "$topdir/$1/$3"
-    cd "$topdir/$1/$3"
-
-    download_tarball $1 $2/$3
-    
-    cd "$topdir"
-}
-
-if [ "$skipsrc" == 'no' ]
-then
-
-    mkdir -p "$topdir"
-    cd "$topdir"
+"bionic"
+)
 
 
-    for source in "${sources[@]}"
-    do
-	_buildref="$buildref"
-	download "$source" "$_buildref"
-    done
-
-    cd "$topdir"
-
-    if [[ "$skipbenches" == 'yes' ]]
-    then
-	find bionic -type d -name 'benchmarks' -exec rm -r {} +
-    else
-	download 'external/google-benchmark' $buildref
-    fi
-
-fi
-
-if [[ "$skiptests" == 'yes' ]]
-then
-    cd "$topdir"
-    rm -r bionic/libc/malloc_debug || true
-
-    #this and some other tests are essential for build as they are in main Android.mk
-    tests=( 'system/core/libnativebridge/tests' 'libnativehelper/tests' 'external/compiler-rt/lib/sanitizer_common/tests' 'system/core/libmincrypt/test' )
-
-    for required_test in "${tests[@]}"
-    do
-        mv $required_test ${required_test}1 || true
-    done
-
-    find . -type d -name 'tests' -prune -exec rm -r {} +
-    find . -type d -name 'test' -prune -exec rm -r {} +
-
-    for required_test in "${tests[@]}"
-    do                 
-        mv ${required_test}1 $required_test || true
-    done
-
-else
-    download 'system/extras' $buildref
-    download 'external/tinyxml2' $buildref
-fi
-
-for patch in $scriptdir/*.patch
+for package in ${packages[@]}
 do
-    patch -f -p1 < "$patch" || true
+    git clone ${AOSP_MIRROR}/platform/${package} ${package} -b ${ANDROID_VERSION} --depth=1
 done
 
+# Patch source file to allow building with incomplete dependencies
 
+sed -i 's@$(call inherit-product, packages/modules/Virtualization/apex/product_packages.mk)@\
+#$(call inherit-product, packages/modules/Virtualization/apex/product_packages.mk)@g' \
+build/make/target/product/aosp_x86_64.mk 
 
-if [ "$skipindeps" == 'no' ]
-then
-    _buildref="$buildref"
-    for tool in "${prebuilts[@]}"
-    do
-        download "$tool" "$_buildref"
-    done
-    rm -r prebuilts/misc/common/android-support-test || true
-    
+rm system/core/trusty/stats/aidl/Android.bp
+cat << EOF > system/core/trusty/stats/aidl/Android.bp 
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+EOF
 
-    if [ "$usetgz" == 'no' ]
-    then
-        download 'prebuilts/misc' $_buildref
-    else
-        download_single_folder 'prebuilts/misc' $_buildref 'linux-x86/relocation_packer'
-    fi
-fi
+rm -rf hardware/qcom
 
-if [ "$skipcross" == 'no' ]
-then
-    crossgcc="prebuilts/gcc/linux-x86/$gccarch/$abi-$gccver"
-    download $crossgcc $buildref
-fi
+sed -i '/# We can do the cross-build only on Linux/N;s/\n/\nifeq ($(HOST_OS),linux-disabled) #/' \
+build/core/envsetup.mk
 
-cd "$topdir"
+sed -i 's/jdk11/jdk17/g' build/bazel/bin/bazel
 
-source build/envsetup.sh
-lunch "aosp_$ndkarch-eng" > /dev/null
-m clobber
+. build/envsetup.sh
 
-if [ "$skiputil" == 'no' ]
-then
-    #cd "$topdir/external/zlib"
-    m libz -j5
-    mmm external/iputils
-fi
+lunch aosp_x86_64-eng
 
-#cd "$topdir/bionic"
+mkdir -p cts/tests/tests/os/assets/
+echo ${ANDROID_VERSION_MAJOR} > cts/tests/tests/os/assets/platform_releases.txt
+echo ${ANDROID_VERSION_MAJOR} > cts/tests/tests/os/assets/platform_versions.txt 
+
 m -j5 libc libc++ libdl libm libstdc++ liblog libbase linker
-
-outdir="$topdir/out/target/product/generic"
-test -d "${outdir}_$ndkarch" && outdir+="_$ndkarch"
-
-cd "$outdir"
-if [ "$skiputil" == 'no' ]
-then
-    outfile="$topdir/../bionic_${arch}_${buildref}_utils.tar.xz"
-else
-    outfile="$topdir/../bionic_${arch}_${buildref}.tar.xz"
-fi    
-
-tar -cJf "$outfile" system
-
-set +e
